@@ -1,0 +1,142 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/shared"
+)
+
+// define LLM structure
+/*
+	Modelname:模型名称
+	SystemPrompt:系统提示词
+	RagCtx: RAG向量信息
+	Tools：可以调用的工具信息
+	Messgage: 历史对话信息
+	LLM：调用大模型api的实例
+*/
+type OpenAI_ai struct {
+	Ctx context.Context
+	Modelname string
+	SystemPrompt string
+	RagCtx string
+	Tools []mcp.Tool
+	Message []openai.ChatCompletionMessageParamUnion
+	LLM openai.Client
+}
+
+
+type LLM_Option func(*OpenAI_ai)
+
+// init model internal systemprompt
+func WithSystemPrompt(prompt string) LLM_Option{
+	return func (llmp *OpenAI_ai)  {
+		llmp.SystemPrompt = prompt
+	}
+}
+
+// init modelname
+func WithModelname(model_name string) LLM_Option{
+	return func (llmp *OpenAI_ai)  {
+		llmp.Modelname = model_name
+	}
+}
+
+// init Rag context
+func WithRagctx(ragctx string) LLM_Option{
+	return func(llmp *OpenAI_ai) {
+		llmp.RagCtx = ragctx
+	}
+}
+
+// init Tools
+func WithTools(tool []mcp.Tool) LLM_Option{
+	return func(llmp *OpenAI_ai){
+		llmp.Tools = tool
+	}
+}
+
+// init LLM client
+func CreateNewClient(ctx context.Context, model_name string, opts ...LLM_Option) *OpenAI_ai {
+	if model_name == ""{
+		panic("Error: Model name is empty.")
+	}
+	// get api key
+	apiKey := os.Getenv("OPENAI_API")
+	baseURL := os.Getenv("OPENAI_API_BASE_URL")
+	if apiKey == ""{
+		panic("Error:API key is empty")
+	}
+
+	// 构建gpt client 需要的option
+	options := []option.RequestOption{
+		option.WithAPIKey(apiKey),
+	}
+	if baseURL != ""{
+		options = append(options, option.WithBaseURL(baseURL))
+	}
+	// 创建LLM client
+	cli := openai.NewClient(options...)
+	// 根据参数构造llm结构体
+	llm := &OpenAI_ai{
+		Ctx: ctx,
+		Modelname: model_name,
+		LLM: cli,
+	}
+	for _, opt := range opts{
+		opt(llm)
+	}
+	// 将本次系统提示词封装成系统message，加入整个对话历史
+	if llm.SystemPrompt != ""{
+		llm.Message = append(llm.Message, openai.SystemMessage(llm.SystemPrompt))
+	}
+	// rag信息同理
+	if llm.RagCtx != ""{
+		llm.Message = append(llm.Message, openai.SystemMessage(llm.RagCtx))
+	}
+	fmt.Println("Successfully init llm")
+	return llm
+}
+
+
+// chat方法
+// 第一个括号表示绑定在OpenAI_ai这个结构体指针上的函数
+func (c *OpenAI_ai) Chat(prompt string) (result string, toolCall []openai.ToolCallUnion){
+	if prompt != ""{
+		c.Message = append(c.Message,openai.UserMessage(prompt))
+	}
+	gpt_tools := MCPtool2OpenAItool(c.Tools)
+	c.LLM.Chat.Completions.NewStreaming(c.Ctx, openai.ChatCompletionNewParams{
+		Model: c.Modelname,
+		Messages: c.Message,
+		Seed: openai.Int(0),
+		// 这边要做一个转换，mcp的tool不是openai的tool
+		Tools: gpt_tools,
+	})
+}
+
+func MCPtool2OpenAItool(mcp_tool []mcp.Tool) []openai.ChatCompletionToolUnionParam{
+	Openai_tool := make([]openai.ChatCompletionToolUnionParam,0,len(mcp_tool))
+	for _ , tool := range mcp_tool{
+		parms := openai.FunctionParameters{
+			"type":tool.InputSchema.Type,
+			"properties":tool.InputSchema.Properties,
+			"required":tool.InputSchema.Required,
+		}
+		Openai_tool = append(Openai_tool, openai.ChatCompletionToolUnionParam{
+			OfFunction: &openai.ChatCompletionFunctionToolParam{
+				Function: shared.FunctionDefinitionParam{
+					Name: tool.Name,
+					Description: openai.String(tool.Description),
+					Parameters: parms,
+				},
+			},
+		})
+	}
+	return nil
+}
