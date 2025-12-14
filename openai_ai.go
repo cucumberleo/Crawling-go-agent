@@ -111,15 +111,50 @@ func (c *OpenAI_ai) Chat(prompt string) (result string, toolCall []openai.ToolCa
 		c.Message = append(c.Message,openai.UserMessage(prompt))
 	}
 	gpt_tools := MCPtool2OpenAItool(c.Tools)
-	c.LLM.Chat.Completions.NewStreaming(c.Ctx, openai.ChatCompletionNewParams{
+	stream := c.LLM.Chat.Completions.NewStreaming(c.Ctx, openai.ChatCompletionNewParams{
 		Model: c.Modelname,
 		Messages: c.Message,
 		Seed: openai.Int(0),
 		// 这边要做一个转换，mcp的tool不是openai的tool
 		Tools: gpt_tools,
 	})
+	result = ""
+	finished := false
+	// 存放chunk的容器
+	acc := openai.ChatCompletionAccumulator{}
+	for stream.Next(){
+		chunk := stream.Current()
+		// 流变成块存放进去
+		acc.AddChunk(chunk)
+		// 如果内容已经结束,结果就是当前的内容
+		if content, ok := acc.JustFinishedContent(); ok{
+			finished = true
+			result = content
+		}
+		if tool, ok := acc.JustFinishedToolCall(); ok{
+			fmt.Println("Tool called: ",tool.Name)
+			toolCall = append(toolCall, openai.ToolCallUnion{
+				ID: tool.ID,
+				Function: openai.FunctionToolCallFunction{
+					Name: tool.Name,
+					Arguments: tool.Arguments,
+				},
+			})
+		}
+		if len(chunk.Choices) > 0{
+			delta := chunk.Choices[0].Delta.Content
+			if !finished{
+				result += delta
+			}
+		}
+		if stream.Err() != nil{
+			panic(stream.Err())
+		}
+	}
+	return result,toolCall
 }
 
+// 将mcp tools转化成openai tools
 func MCPtool2OpenAItool(mcp_tool []mcp.Tool) []openai.ChatCompletionToolUnionParam{
 	Openai_tool := make([]openai.ChatCompletionToolUnionParam,0,len(mcp_tool))
 	for _ , tool := range mcp_tool{
@@ -138,5 +173,5 @@ func MCPtool2OpenAItool(mcp_tool []mcp.Tool) []openai.ChatCompletionToolUnionPar
 			},
 		})
 	}
-	return nil
+	return Openai_tool
 }
