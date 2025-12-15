@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/openai/openai-go/v3"
@@ -67,7 +68,7 @@ func CreateNewClient(ctx context.Context, model_name string, opts ...LLM_Option)
 		panic("Error: Model name is empty.")
 	}
 	// get api key
-	apiKey := os.Getenv("OPENAI_API")
+	apiKey := os.Getenv("OPENAI_API_KEY")
 	baseURL := os.Getenv("OPENAI_API_BASE_URL")
 	if apiKey == ""{
 		panic("Error:API key is empty")
@@ -118,19 +119,21 @@ func (c *OpenAI_ai) Chat(prompt string) (result string, toolCall []openai.ToolCa
 		// 这边要做一个转换，mcp的tool不是openai的tool
 		Tools: gpt_tools,
 	})
+	// 增加流错误检查
+	if err := stream.Err(); err != nil {
+        panic(fmt.Sprintf("Stream initialization error: %v", err))
+    }
 	result = ""
-	finished := false
+	// finished := false
+	var fullContent strings.Builder
 	// 存放chunk的容器
 	acc := openai.ChatCompletionAccumulator{}
 	for stream.Next(){
 		chunk := stream.Current()
+		// fmt.Printf("Received chunk: [%s]\n", chunk.Choices[0].Delta.Content)
 		// 流变成块存放进去
 		acc.AddChunk(chunk)
 		// 如果内容已经结束,结果就是当前的内容
-		if content, ok := acc.JustFinishedContent(); ok{
-			finished = true
-			result = content
-		}
 		if tool, ok := acc.JustFinishedToolCall(); ok{
 			fmt.Println("Tool called: ",tool.Name)
 			toolCall = append(toolCall, openai.ToolCallUnion{
@@ -141,16 +144,14 @@ func (c *OpenAI_ai) Chat(prompt string) (result string, toolCall []openai.ToolCa
 				},
 			})
 		}
-		if len(chunk.Choices) > 0{
-			delta := chunk.Choices[0].Delta.Content
-			if !finished{
-				result += delta
-			}
-		}
-		if stream.Err() != nil{
-			panic(stream.Err())
-		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+            fullContent.WriteString(chunk.Choices[0].Delta.Content)
+        }
+		// if stream.Err() != nil{
+		// 	panic(stream.Err())
+		// }
 	}
+	result = fullContent.String()
 	return result,toolCall
 }
 
