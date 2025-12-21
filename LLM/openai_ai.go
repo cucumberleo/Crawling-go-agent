@@ -109,7 +109,9 @@ func (c *OpenAI_ai) Chat(prompt string) (result string, toolCall []openai.ToolCa
 	if prompt != "" {
 		c.Message = append(c.Message, openai.UserMessage(prompt))
 	}
+	fmt.Printf("[LLM] 正在准备 API 请求，工具数量: %d\n", len(c.Tools))
 	gpt_tools := MCPtool2OpenAItool(c.Tools)
+	fmt.Println("[LLM] 正在发送请求到 OpenAI API...")
 	stream := c.LLM.Chat.Completions.NewStreaming(c.Ctx, openai.ChatCompletionNewParams{
 		Model:    c.Modelname,
 		Messages: c.Message,
@@ -121,19 +123,22 @@ func (c *OpenAI_ai) Chat(prompt string) (result string, toolCall []openai.ToolCa
 	if err := stream.Err(); err != nil {
 		panic(fmt.Sprintf("Stream initialization error: %v", err))
 	}
+	fmt.Println("[LLM] 开始接收流式响应...")
 	result = ""
 	// finished := false
 	var fullContent strings.Builder
 	// 存放chunk的容器
 	acc := openai.ChatCompletionAccumulator{}
+	chunkCount := 0
 	for stream.Next() {
+		chunkCount++
 		chunk := stream.Current()
 		// fmt.Printf("Received chunk: [%s]\n", chunk.Choices[0].Delta.Content)
 		// 流变成块存放进去
 		acc.AddChunk(chunk)
 		// 如果内容已经结束,结果就是当前的内容
 		if tool, ok := acc.JustFinishedToolCall(); ok {
-			fmt.Println("Tool called: ", tool.Name)
+			fmt.Printf("[LLM] 检测到工具调用: %s\n", tool.Name)
 			toolCall = append(toolCall, openai.ToolCallUnion{
 				ID: tool.ID,
 				Function: openai.FunctionToolCallFunction{
@@ -149,6 +154,14 @@ func (c *OpenAI_ai) Chat(prompt string) (result string, toolCall []openai.ToolCa
 		// 	panic(stream.Err())
 		// }
 	}
+	if err := stream.Err(); err != nil {
+		fmt.Printf("[LLM] 流式响应错误: %v\n", err)
+	}
+	fmt.Printf("[LLM] 接收完成，共收到 %d 个数据块，内容长度: %d 字符\n", chunkCount, fullContent.Len())
+	// 将本次assistant消息补回历史，确保下一轮ToolMessage正确关联
+	if len(acc.Choices) > 0 {
+		c.Message = append(c.Message, acc.Choices[0].Message.ToParam())
+	}
 	result = fullContent.String()
 	return result, toolCall
 }
@@ -157,10 +170,16 @@ func (c *OpenAI_ai) Chat(prompt string) (result string, toolCall []openai.ToolCa
 func MCPtool2OpenAItool(mcp_tool []mcp.Tool) []openai.ChatCompletionToolUnionParam {
 	Openai_tool := make([]openai.ChatCompletionToolUnionParam, 0, len(mcp_tool))
 	for _, tool := range mcp_tool {
+		// 确保 required 字段总是一个数组，不能是 nil
+		required := tool.InputSchema.Required
+		if required == nil {
+			required = []string{}
+		}
+		
 		parms := openai.FunctionParameters{
 			"type":       tool.InputSchema.Type,
 			"properties": tool.InputSchema.Properties,
-			"required":   tool.InputSchema.Required,
+			"required":   required,
 		}
 		Openai_tool = append(Openai_tool, openai.ChatCompletionToolUnionParam{
 			OfFunction: &openai.ChatCompletionFunctionToolParam{
